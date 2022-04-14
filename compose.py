@@ -41,6 +41,10 @@ class Controller:
     def get(self):
         return self.q.get() 
         
+    def iter_msgs(self):
+        while not self.q.empty():
+            yield self.q.get()
+
     def _clear_port(self):
         list(self.port.iter_pending())
         
@@ -67,4 +71,5 @@ class Controller:
             if self._filter(msg):
                 msg.__dict__['t'] = time.time() - self.t0
                 self.q.put(msg) 
-                self._process(self.q.get()) # test
+                self._process(msg) # test
+                #self._process(self.q.get()) # test
