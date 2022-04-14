@@ -1,5 +1,6 @@
 import threading
 import math
+import random
 import numpy as np
 import sounddevice as sd
 import time
@@ -23,6 +24,32 @@ class Status(IntFlag):
     ATTACKING = 2
     RELEASING = 4
 
+class Preset:
+    PRESETS = { }
+    def __init__(self, name, a, s, d, r, alpha, beta, gamma):
+        params = locals()
+        params.pop('self')
+        for k,v in params.items():
+            setattr(self, k, v)
+    def __repr__(self):
+        return repr(self.__dict__ )
+
+    @classmethod
+    def random(cls, s, low=1, high=5):
+        vowels = 'aeiou'
+        nums = '0123456789'
+        consonants = 'bcdfghjklmnpqrstvwxyz'
+        name = str(''.join([random.choice(i) for i in (vowels, nums, consonants)]))
+        vals = [random.randint(low, high) for i in range(3)]
+        a = 2*random.random() + .001
+        r = 2*random.random() + .001
+        p = Preset(name=name,a=a,s=-1,d=-1,r=r,alpha=vals[0],beta=vals[1],gamma=vals[2])
+        presets[name] = p
+        print(p)
+        s.load_preset(name)
+
+presets = {'hollow':Preset(name='hollow', a=.2, s=-1, d=-1, r=1, alpha=1, beta=2, gamma=1)}
+
 class Note:
     MIDI_TO_FREQ = {midi_val:midi_to_freq(midi_val) for midi_val in range(128)}
 
@@ -30,7 +57,7 @@ class Note:
         self.midi_val = midi_val
         self.freq = self.MIDI_TO_FREQ[midi_val]
         self.start = start_frame
-        self.status = Status.ON
+        self.status = Status.ON | Status.ATTACKING
         self.released_at = False
         self._hash = hash((midi_val,self.start)) #hash((self.midi_val, self.status))#self.start))
 
@@ -39,6 +66,12 @@ class Note:
 
     def is_releasing(self):
         return self.status & Status.RELEASING
+
+    def is_attacking(self):
+        return self.status & Status.ATTACKING
+
+    def end_attack(self):
+        self.status &= ~Status.ATTACKING
 
     def __hash__(self):
         return self._hash
@@ -71,9 +104,18 @@ class Synth:
         self.notes_on = { } # map Note => time note started
         self.releasing = { }
         self._running = False
-        self.config = dict(a=1,b=1,c=0)
+        self.wave_config = dict(a=1,b=1,c=0)
         self._set_envelope() # testing
         
+    def load_preset(self, name):
+        p = presets.get(name)
+        if not p:
+            print('No preset named', name)
+        self.wave_config = dict(a=p.alpha,b=p.beta,c=p.gamma)
+        self.attack = p.a
+        self.release = p.r
+        print('Loaded preset:', name)
+
     def stop(self):
         self.event.set()
         self.controller.stop()
@@ -142,24 +184,26 @@ class Synth:
         """ if note is just starting, ramp up its amplitude """
         playhead_t = self.frame_index # current frame index
         dt = playhead_t - note.start # dt is how far (in frames) into note's ASDR cycle
-        print(f'note:{note}, dt:{dt}')
-        if dt < self.attack_frames: 
+        #print(f'attacking:{note}, dt:{dt}')
+        if dt <= self.attack_frames: 
             # align envelope with wave
             wave *= self._attack_envelope[dt:dt+512]  # 512 = buffersize = len(t) on some axis
+        else:
+            note.end_attack()
         return wave
 
     def _apply_release_envelope(self, wave, t, note):
         playhead_t = self.frame_index # current sample index
         released_t0 = self.releasing[note]
         dt = playhead_t - released_t0 # dt is how far (in frames) into note's release
-        print(f'releasing note:{note}, dt:{dt}')
+        #print(f'releasing note:{note}, dt:{dt}')
         wave *= self._release_envelope[dt:dt+512]  # 512 = buffersize = len(t) on some axis
         if dt > self.release_frames: #self.release_t*self.sr:
             self._remove_note(note)
         return wave
 
     def _wave_func(self, t, w):
-        a,b,c = self.config.values() # modulate wave shape with parameters
+        a,b,c = self.wave_config.values() # modulate wave shape with parameters
         wave = np.sin(c*np.sin(b*w*t) + a*w*t)
         return wave
 
@@ -209,7 +253,8 @@ class Synth:
         for note in notes:
             w = 2*np.pi*note.freq
             wave = (self.A)*self._wave_func(t, w)
-            wave = self._apply_attack_envelope(wave, t, note)
+            if note.is_attacking():
+                wave = self._apply_attack_envelope(wave, t, note)
             if note.is_releasing():
                 wave = self._apply_release_envelope(wave, t, note)
             waves.append(wave)
