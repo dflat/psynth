@@ -56,7 +56,7 @@ class Note:
 
 
 class Synth:
-    
+    ASDR = dict(a=0.2, s=-1, d=-1, r=1) 
     def __init__(self, controller):
         self.controller = controller
         self.channels = 1
@@ -87,7 +87,6 @@ class Synth:
         t.start()
         
     def _play(self):
-        #self._set_envelope() # testing
         self.frame_index = 0
         with sd.OutputStream(channels=self.channels,
                              callback=lambda o,f,t,s: self.callback(o,f,t,s),
@@ -98,8 +97,8 @@ class Synth:
             print('stopped')
         
     def _set_envelope(self):
-        self._set_attack_envelope(.2)
-        self._set_release_envelope(.2)
+        self._set_attack_envelope(self.ASDR['a'])
+        self._set_release_envelope(self.ASDR['r'])
 
     @property
     def release(self):
@@ -118,71 +117,46 @@ class Synth:
     def _set_release_envelope(self, release_time):
         self.ASDR_t = 6
         self.release_t = release_time
-        release_samples = int(self.release_t*self.sr)
-        self.release_samples = release_samples
+        release_frames = int(self.release_t*self.sr)
+        self.release_frames = release_frames
         n = self.sr*self.ASDR_t
         T = np.arange(n) / self.sr
-        end_t = T[release_samples]
+        end_t = T[release_frames]
         base = np.zeros(len(T))
-        base[:release_samples] = np.cos(np.pi/2 * T[:release_samples]/end_t)
+        base[:release_frames] = np.cos(np.pi/2 * T[:release_frames]/end_t)
         self._release_envelope = base.reshape(-1,1) 
 
     def _set_attack_envelope(self, attack_time):
         self.ASDR_t = 6
         self.attack_t = attack_time
-        attack_samples = int(self.attack_t*self.sr)
-        self.attack_samples = attack_samples
+        attack_frames = int(self.attack_t*self.sr)
+        self.attack_frames = attack_frames
         n = self.sr*self.ASDR_t
         T = np.arange(n) / self.sr
-        end_t = T[attack_samples]
+        end_t = T[attack_frames]
         base = np.ones(len(T))
-        base[:attack_samples] = np.sin(np.pi/2 * T[:attack_samples]/end_t)
+        base[:attack_frames] = np.sin(np.pi/2 * T[:attack_frames]/end_t)
         self._attack_envelope = base.reshape(-1,1) 
 
     def _apply_attack_envelope(self, wave, t, note):
         """ if note is just starting, ramp up its amplitude """
-        playhead_t = self.frame_index # current sample index
-        #note_t0 = self.notes_on[note]
-        note_t0 = note.start
-        dt = playhead_t - note_t0 # dt is how far (in samples) into note's ASDR cycle
+        playhead_t = self.frame_index # current frame index
+        dt = playhead_t - note.start # dt is how far (in frames) into note's ASDR cycle
         print(f'note:{note}, dt:{dt}')
-        if dt < self.attack_samples: #self.attack_t*self.sr:#*2:
+        if dt < self.attack_frames: 
             # align envelope with wave
             wave *= self._attack_envelope[dt:dt+512]  # 512 = buffersize = len(t) on some axis
         return wave
 
-    def _is_releasing(self, note):
-        return note in self.releasing
-
-    def _release_note(self, note):
-        note.release()
-        self.releasing[note] = self.frame_index # log sample-index at which release triggered
-        #del self.notes_on[note]  # TESTING!
-        print('releasing note:', note)
-
     def _apply_release_envelope(self, wave, t, note):
         playhead_t = self.frame_index # current sample index
         released_t0 = self.releasing[note]
-        dt = playhead_t - released_t0 # dt is how far (in samples) into note's release
+        dt = playhead_t - released_t0 # dt is how far (in frames) into note's release
         print(f'releasing note:{note}, dt:{dt}')
         wave *= self._release_envelope[dt:dt+512]  # 512 = buffersize = len(t) on some axis
-        if dt > self.release_samples: #self.release_t*self.sr:
+        if dt > self.release_frames: #self.release_t*self.sr:
             self._remove_note(note)
         return wave
-
-    def _remove_note(self, note):
-        #if note in self.notes_on:
-        #    del self.notes_on[note] 
-        if note in self.releasing:
-            del self.releasing[note]
-        print(f'removed note:{note}')
-
-    def _start_note(self, note, t0):
-        self.notes_on[note] = t0 # value of starting t-index in discrete sample domain 
-        print(f'started note: {note} at sample: {t0}')
-
-    def _is_new_note(self, note):
-        return note not in self.notes_on
 
     def _wave_func(self, t, w):
         a,b,c = self.config.values() # modulate wave shape with parameters
@@ -198,28 +172,11 @@ class Synth:
         #print(f'after -- max:{mix.max():.2f}, min:{mix.min():.2f}')
         return mix
 
-    def _get_held_notes(self):
-        return [Note.from_msg(msg, self.frame_index) for msg in self.controller.notes_on.values()]
-
-    def _get_sounding_notes(self):
-        notes_held = self._get_held_notes()
-        #notes_held = self.notes_on   ### TESTING, maybe use above line instead if necessary 
-        notes_releasing = set(self.releasing)
-        #return notes_held + list(notes_releasing)
-        return set(notes_held) | notes_releasing
-
-    def _update_notes_on(self):
-        """ keep internal note-state dict in sync with controller's note state """
-        to_drop = set(self.notes_on) - set(self._get_held_notes())
-        to_drop -= set(self.releasing) # don't redrop currently releasing notes
-        for note in to_drop:
-            self._release_note(note)
-
-    def _start_note2(self, note):
+    def _start_note(self, note):
         self.notes_on[note.midi_val] = note
         print(f'started note: {note}')
 
-    def _release_note2(self, midi_val):
+    def _release_note(self, midi_val):
         note = self.notes_on.pop(midi_val)
         if note:
             note.release()
@@ -227,22 +184,27 @@ class Synth:
             self.releasing[note] = self.frame_index # todo: check for bug
             print('releasing note:', note)
 
-    def _sounding_notes2(self):
+    def _remove_note(self, note):
+        if note in self.releasing:
+            del self.releasing[note]
+        print(f'removed note:{note}')
+
+    def _sounding_notes(self):
         notes_held = set(self.notes_on.values())
         notes_releasing = set(self.releasing)
         return notes_held | notes_releasing
 
-    def _get_wave2(self, t):
+    def _get_wave(self, t):
         zero_wave = 0*t
         waves = [zero_wave]
         for msg in self.controller.iter_msgs():
             if msg.type == 'note_on':
                 note = Note.from_msg(msg, self.frame_index)
-                self._start_note2(note)  
+                self._start_note(note)  
             elif msg.type == 'note_off':
-                self._release_note2(msg.note)
+                self._release_note(msg.note)
 
-        notes = self._sounding_notes2()
+        notes = self._sounding_notes()
         n = len(notes)
         for note in notes:
             w = 2*np.pi*note.freq
@@ -253,39 +215,17 @@ class Synth:
             waves.append(wave)
         return self._sum_waves(waves)
         
-    def _get_wave(self, t):
-        zero_wave = 0*t
-        waves = [zero_wave]
-        notes_in_chord = self._get_sounding_notes()
-        n = len(notes_in_chord)
-        for note in notes_in_chord: 
-            if self._is_new_note(note):
-                self._start_note(note, self.frame_index)  # probaby should wrap in a Note class
-            w = 2*np.pi*note.freq
-            #wave = (self.A/n)*self._wave_func(t, w)
-            wave = (self.A)*self._wave_func(t, w)
-            wave = self._apply_attack_envelope(wave, t, note)
-            if self._is_releasing(note):
-                wave = self._apply_release_envelope(wave, t, note)
-            waves.append(wave)
-        return self._sum_waves(waves)
-
     def callback(self, outdata, frames, ctime, status):
             if status:
                 print(status, file=sys.stderr)
 
-            #self._update_notes_on()
-
             t = (self.frame_index + np.arange(frames)) / self.sr
             t = t.reshape(-1, 1)
-            #wave = self._get_wave(t)
-            wave = self._get_wave2(t)
+            wave = self._get_wave(t)
 
             outdata[:] = wave
             self.frame_index += frames
-            #print(f'frames:{frames}\ttime_index:{t[0,0]}')
-            #self.ctime = ctime
-            #print(f'frames:{frames}\ttime_index:{t[0,0]}, ctime:{ctime}')
+
 class Enveloper:
     def __init__(self, a, s, d, r):
         self.attack = a
