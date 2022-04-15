@@ -122,6 +122,8 @@ class Synth:
         self._running = False
     
     def play(self):
+        if self._running:
+            return
         self.controller.listen()
         self.event.clear()
         self._running = True
@@ -231,16 +233,14 @@ class Synth:
     def _remove_note(self, note):
         if note in self.releasing:
             del self.releasing[note]
-        print(f'removed note:{note}')
+            print(f'removed note:{note}')
 
     def _sounding_notes(self):
         notes_held = set(self.notes_on.values())
         notes_releasing = set(self.releasing)
         return notes_held | notes_releasing
 
-    def _get_wave(self, t):
-        zero_wave = 0*t
-        waves = [zero_wave]
+    def _read_input(self):
         for msg in self.controller.iter_msgs():
             if msg.type == 'note_on':
                 note = Note.from_msg(msg, self.frame_index)
@@ -248,6 +248,10 @@ class Synth:
             elif msg.type == 'note_off':
                 self._release_note(msg.note)
 
+    def _get_wave(self, t):
+        zero_wave = 0*t
+        waves = [zero_wave]
+        # note: refactored reading from here into _read_input
         notes = self._sounding_notes()
         n = len(notes)
         for note in notes:
@@ -263,6 +267,8 @@ class Synth:
     def callback(self, outdata, frames, ctime, status):
             if status:
                 print(status, file=sys.stderr)
+
+            self._read_input()
 
             t = (self.frame_index + np.arange(frames)) / self.sr
             t = t.reshape(-1, 1)
