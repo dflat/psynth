@@ -64,6 +64,12 @@ class Note:
     def release(self):
         self.status |= Status.RELEASING
 
+    def end(self):
+        self.status &= ~Status.ON
+
+    def is_ended(self):
+        return not self.status & Status.ON
+
     def is_releasing(self):
         return self.status & Status.RELEASING
 
@@ -89,7 +95,6 @@ class Note:
 
 
 class Synth:
-    ASDR = dict(a=0.2, s=-1, d=-1, r=1) 
     def __init__(self, controller):
         self.controller = controller
         self.channels = 1
@@ -105,9 +110,10 @@ class Synth:
         self.releasing = { }
         self._running = False
         self.wave_config = dict(a=1,b=1,c=0)
-        self._set_envelope() # testing
+        self.enveloper = Enveloper(self)
+        #self._set_envelope() # testing
         
-    def load_preset(self, name):
+    def load_preset(self, name): # this will be broken after refactoring to Enveloper
         p = presets.get(name)
         if not p:
             print('No preset named', name)
@@ -139,70 +145,6 @@ class Synth:
             print('playing..')
             self.event.wait()
             print('stopped')
-        
-    def _set_envelope(self):
-        self._set_attack_envelope(self.ASDR['a'])
-        self._set_release_envelope(self.ASDR['r'])
-
-    @property
-    def release(self):
-        return self.release_t
-    @release.setter
-    def release(self, release_time):
-        self._set_release_envelope(release_time)
-
-    @property
-    def attack(self):
-        return self.attack_t
-    @attack.setter
-    def attack(self, attack_time):
-        self._set_attack_envelope(attack_time)
-
-    def _set_release_envelope(self, release_time):
-        self.ASDR_t = 6
-        self.release_t = release_time
-        release_frames = int(self.release_t*self.sr)
-        self.release_frames = release_frames
-        n = self.sr*self.ASDR_t
-        T = np.arange(n) / self.sr
-        end_t = T[release_frames]
-        base = np.zeros(len(T))
-        base[:release_frames] = np.cos(np.pi/2 * T[:release_frames]/end_t)
-        self._release_envelope = base.reshape(-1,1) 
-
-    def _set_attack_envelope(self, attack_time):
-        self.ASDR_t = 6
-        self.attack_t = attack_time
-        attack_frames = int(self.attack_t*self.sr)
-        self.attack_frames = attack_frames
-        n = self.sr*self.ASDR_t
-        T = np.arange(n) / self.sr
-        end_t = T[attack_frames]
-        base = np.ones(len(T))
-        base[:attack_frames] = np.sin(np.pi/2 * T[:attack_frames]/end_t)
-        self._attack_envelope = base.reshape(-1,1) 
-
-    def _apply_attack_envelope(self, wave, t, note):
-        """ if note is just starting, ramp up its amplitude """
-        playhead_t = self.frame_index # current frame index
-        dt = playhead_t - note.start # dt is how far (in frames) into note's ASDR cycle
-        #print(f'attacking:{note}, dt:{dt}')
-        if dt <= self.attack_frames: 
-            # align envelope with wave
-            wave *= self._attack_envelope[dt:dt+512]  # 512 = buffersize = len(t) on some axis
-        else:
-            note.end_attack()
-        return wave
-
-    def _apply_release_envelope(self, wave, t, note):
-        playhead_t = self.frame_index # current sample index
-        released_t0 = self.releasing[note]
-        dt = playhead_t - released_t0 # dt is how far (in frames) into note's release
-        #print(f'releasing note:{note}, dt:{dt}')
-        wave *= self._release_envelope[dt:dt+512]  # 512 = buffersize = len(t) on some axis
-        if dt > self.release_frames: #self.release_t*self.sr:
-            self._remove_note(note)
-        return wave
 
     def _wave_func(self, t, w):
         a,b,c = self.wave_config.values() # modulate wave shape with parameters
@@ -237,6 +179,9 @@ class Synth:
 
     def _sounding_notes(self):
         notes_held = set(self.notes_on.values())
+        for note in set(self.releasing): 
+            if note.is_ended():        # Enveloper will set note state to off, this cleans up
+                self._remove_note(note)
         notes_releasing = set(self.releasing)
         return notes_held | notes_releasing
 
@@ -257,10 +202,15 @@ class Synth:
         for note in notes:
             w = 2*np.pi*note.freq
             wave = (self.A)*self._wave_func(t, w)
-            if note.is_attacking():
-                wave = self._apply_attack_envelope(wave, t, note)
-            if note.is_releasing():
-                wave = self._apply_release_envelope(wave, t, note)
+            
+            # apply processing pipleine to wave (just enveloper for now)
+            wave = self.enveloper.process(wave, t, note)
+
+            #if note.is_attacking():   # done in enveloper class now
+            #    wave = self._apply_attack_envelope(wave, t, note)
+            #if note.is_releasing():
+            #    wave = self._apply_release_envelope(wave, t, note)
+
             waves.append(wave)
         return self._sum_waves(waves)
         
@@ -278,8 +228,73 @@ class Synth:
             self.frame_index += frames
 
 class Enveloper:
-    def __init__(self, a, s, d, r):
-        self.attack = a
-        self.sustain = s
-        self.decay = d
-        self.release = r
+    ASDR = dict(a=0.2, s=-1, d=-1, r=1)  # defaults
+    def __init__(self, synth, a=None, s=None, d=None, r=None):
+        self.synth = synth
+        self.buffer_t = 1
+        self.attack = a or self.ASDR['a']
+        self.sustain = s or self.ASDR['s']
+        self.decay = d or self.ASDR['d']
+        self.release = r or self.ASDR['r']
+
+    @property
+    def release(self):
+        return self.release_t
+    @release.setter
+    def release(self, release_time):
+        self._set_release_envelope(release_time)
+
+    @property
+    def attack(self):
+        return self.attack_t
+    @attack.setter
+    def attack(self, attack_time):
+        self._set_attack_envelope(attack_time)
+   
+    def process(self, wave, t, note):
+        if note.is_attacking():
+            wave = self._apply_attack_envelope(wave, t, note)
+        if note.is_releasing():
+            wave = self._apply_release_envelope(wave, t, note)
+        return wave
+
+    def _apply_attack_envelope(self, wave, t, note):
+        playhead_t = self.synth.frame_index       # Current frame index
+        dt = playhead_t - note.start              # How far (in frames) into note's ASDR cycle
+        if dt <= self.attack_frames: 
+            wave *= self._attack_envelope[dt:dt+512]  # 512 = buffersize = len(t) on some axis
+        else:
+            note.end_attack()
+        return wave
+
+    def _apply_release_envelope(self, wave, t, note):
+        playhead_t = self.synth.frame_index 
+        released_t0 = note.released_at
+        dt = playhead_t - released_t0 
+        wave *= self._release_envelope[dt:dt+512] 
+        if dt > self.release_frames: 
+            note.end()  # this communicates with synth to remove note
+        return wave
+
+    def _set_release_envelope(self, release_time):
+        self.release_t = release_time
+        release_frames = int(self.release_t*self.synth.sr)
+        self.release_frames = release_frames
+        n = self.synth.sr*(release_time + self.buffer_t) 
+        T = np.arange(n) / self.synth.sr
+        end_t = T[release_frames]
+        base = np.zeros(len(T))
+        base[:release_frames] = np.cos(np.pi/2 * T[:release_frames]/end_t)
+        self._release_envelope = base.reshape(-1,1) 
+
+    def _set_attack_envelope(self, attack_time):
+        self.attack_t = attack_time
+        attack_frames = int(self.attack_t*self.synth.sr)
+        self.attack_frames = attack_frames
+        n = self.synth.sr*(attack_time + self.buffer_t) 
+        T = np.arange(n) / self.synth.sr
+        end_t = T[attack_frames]
+        base = np.ones(len(T))
+        base[:attack_frames] = np.sin(np.pi/2 * T[:attack_frames]/end_t)
+        self._attack_envelope = base.reshape(-1,1) 
+
