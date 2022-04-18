@@ -56,7 +56,7 @@ class Controller:
                 self.notes_on.pop(msg.note)
         print(self.notes_on.keys()) # test
         
-    def listen(self, types=['note_on','note_off']):
+    def listen(self, types=['note_on','note_off','control_change']):
         self.types = types
         self.register_filter(lambda msg: msg.type in self.types)
         t = threading.Thread(target=self._listen)
